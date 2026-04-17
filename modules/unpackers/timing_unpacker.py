@@ -33,7 +33,9 @@ class TimingDataUnpacker:
     def __init__(self, filename):
         self.filename = filename
         self.events = []
-        self.file_header_size = 25  # First 25 bytes are file header
+        self.file_header_size = 25  # Will be dynamically calculated later
+        self.time_unit = 0          # 0 = LSB, 1 = nanoseconds
+        self.toa_lsb_ns = 0.5       # Default LSB value in ns
 
     def unpack(self):
         """Unpack all events from the binary file"""
@@ -41,7 +43,11 @@ class TimingDataUnpacker:
             data = f.read()
 
         print(f"File size: {len(data)} bytes")
-        print(f"Skipping {self.file_header_size} byte header...")
+        if len(data) >= 1:
+            num_boards = data[0]
+            self.file_header_size = 9 + 8 * num_boards
+            
+        print(f"Skipping {self.file_header_size} byte dynamic header...")
 
         # Skip file header
         offset = self.file_header_size

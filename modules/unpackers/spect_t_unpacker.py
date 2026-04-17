@@ -50,7 +50,7 @@ class SpecTDataUnpacker:
     def __init__(self, filename):
         self.filename = filename
         self.events = []
-        self.file_header_size = 25  # First 25 bytes are file header
+        self.file_header_size = 25  # Will be dynamically updated in _parse_header
         self.time_unit = 0          # 0 = LSB, 1 = nanoseconds
         self.toa_lsb_ns = 0.5       # Default LSB value in ns
 
@@ -127,10 +127,18 @@ class SpecTDataUnpacker:
     # ------------------------------------------------------------------
 
     def _parse_header(self, data):
-        """Parse the 25-byte file header."""
-        if len(data) < 25:
+        """Parse the dynamic file header."""
+        if len(data) < 1:
             print("Warning: file too small for header")
             return
+            
+        num_boards = data[0]
+        self.file_header_size = 9 + 8 * num_boards
+
+        if len(data) < self.file_header_size:
+            print(f"Warning: file too small for {self.file_header_size}-byte header")
+            return
+            
         self.time_unit  = data[12]
         self.toa_lsb_ns = _F32.unpack_from(data, 13)[0]
 

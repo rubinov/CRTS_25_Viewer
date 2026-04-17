@@ -4,7 +4,8 @@ Unified Event Viewer GUI for JanusC
 Displays events from both TIMING and SPECTROSCOPY+TIMING mode binary files
 
 Author: Claude (with Paul)
-Date: 2 January 2026
+Started Date: 2 January 2026
+Last Updated: 17 April 2026
 """
 
 import tkinter as tk
