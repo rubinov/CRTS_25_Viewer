@@ -45,7 +45,7 @@ class TimingDataUnpacker:
         print(f"File size: {len(data)} bytes")
         if len(data) >= 1:
             num_boards = data[0]
-            self.file_header_size = 9 + 8 * num_boards
+            self.file_header_size = 1 + 8 * num_boards
             
         print(f"Skipping {self.file_header_size} byte dynamic header...")
 

@@ -1,0 +1,76 @@
+51: # Chunked loading state
+52: self.chunked_load = tk.BooleanVar(value=True)  # True = lazy chunks, False = load all
+54: self.parse_offset = 0          # Byte offset of next unparsed event
+55: self.events_parse_count = 0    # Total raw events parsed so far
+56: self.all_events_loaded = False # True once parse_offset reaches EOF
+57: self.chunk_size = 100          # Events to parse per chunk
+58: self.load_threshold = 10       # Trigger next chunk when <=N events remain
+128: # Chunked load toggle
+129: tk.Checkbutton(control_frame, text="Load in chunks (100 events)",
+130: variable=self.chunked_load,
+331: def parse_mapping_file(path):
+349: mapping = parse_mapping_file(filename)
+355: mapping = parse_mapping_file(alt)
+360: mapping = parse_mapping_file(alt2)
+365: mapping = parse_mapping_file(alt3)
+399: then parses only the first chunk of events for fast startup."""
+413: # Read the entire file into memory in one I/O call (fast),
+414: # but do NOT parse events yet.
+428: self.unpacker._parse_header(self.file_data)
+433: # Reset chunked-loading state
+436: self.parse_offset = self.unpacker.file_header_size
+437: self.events_parse_count = 0
+438: self.all_events_loaded = False
+440: if self.chunked_load.get():
+441: print(f"Chunked mode: parsing first {self.chunk_size} events...")
+442: # Parse only the first chunk; rest loads lazily on navigation
+443: self._parse_chunk()
+446: # Parse the entire file now (original behaviour)
+449: self.all_events_loaded = True
+467: more_msg = "" if self.all_events_loaded else "\n(More events will load as you navigate)"
+478: def _parse_chunk(self):
+480: Parse up to self.chunk_size events from self.file_data starting at
+481: self.parse_offset. Updates self.raw_events, self.parse_offset, and
+482: self.events_parse_count in-place.
+483: Returns the number of new events parsed.
+485: if self.all_events_loaded or self.file_data is None:
+488: parsed = 0
+491: while parsed < self.chunk_size:
+492: if self.parse_offset + 13 > len(data):
+493: self.all_events_loaded = True
+497: event, next_offset = self.unpacker._parse_event(
+498: data, self.parse_offset, self.events_parse_count
+501: print(f"Parse error at offset {self.parse_offset}: {e}")
+502: self.all_events_loaded = True
+505: if event is None or next_offset <= self.parse_offset:
+506: self.all_events_loaded = True
+511: self.events_parse_count += 1
+512: self.parse_offset = next_offset
+513: parsed += 1
+516: if self.parse_offset + 13 >= len(data):
+517: self.all_events_loaded = True
+519: pct = 100.0 * self.parse_offset / len(data) if data else 0
+520: print(f"  Parsed {parsed} events | total: {self.events_parse_count} | "
+521: f"offset: {self.parse_offset:,}/{len(data):,} bytes ({pct:.1f}%)"
+522: + (" [DONE]" if self.all_events_loaded else ""))
+524: return parsed
+528: Check whether we are within load_threshold events of the end of the
+529: currently filtered list. If so, parse the next chunk, re-pair all
+533: if self.all_events_loaded or self.file_data is None:
+540: print(f"  [lazy load] {remaining} events remaining, fetching next chunk...")
+541: n = self._parse_chunk()
+568: if self.all_events_loaded:
+612: Supports board_id 0, 1, and 2.  When chunked loading is active, the
+613: last 10 raw events are held back so events at a chunk boundary are
+619: if not self.all_events_loaded and len(self.raw_events) > LOOKAHEAD:
+782: """Go to next event; trigger lazy chunk load if near end of loaded events"""
+805: self.check_for_new_events()
+813: def check_for_new_events(self):
+843: self.watch_after_id = self.root.after(500, self.check_for_new_events)
+961: """Background thread: parse entire file and accumulate per-channel histograms.
+996: all_parsed = []   # keep every event for post-parse pairing/filtering
+999: # ── Pass 1: parse all events, accumulate all-events histograms ──────
+1006: event, next_offset = self.unpacker._parse_event(data, offset, count)
+1021: all_parsed.append(event)
+1033: pairs = self._pair_raw_events(all_parsed)
+1047: for event in all_parsed:

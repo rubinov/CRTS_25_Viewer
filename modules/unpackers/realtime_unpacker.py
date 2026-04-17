@@ -54,7 +54,10 @@ class RealtimeEventUnpacker:
 
         if len(data) >= 1:
             num_boards = data[0]
-            self.file_header_size = 9 + 8 * num_boards
+            if 0 < num_boards <= 16:
+                self.file_header_size = 1 + 8 * num_boards
+            else:
+                self.file_header_size = 25
             
         if self.last_safe_offset < self.file_header_size:
             self.last_safe_offset = self.file_header_size

@@ -50,7 +50,6 @@ class UnifiedEventViewer:
         self.board2_strip_cells_bot = {}    # ch -> Label, strip row 1 (near Board 1 header)
 
         # Chunked loading state
-        self.chunked_load = tk.BooleanVar(value=True)  # True = lazy chunks, False = load all
         self.file_data = None          # Raw bytes of the loaded file (held in memory)
         self.parse_offset = 0          # Byte offset of next unparsed event
         self.events_parse_count = 0    # Total raw events parsed so far
@@ -125,13 +124,6 @@ class UnifiedEventViewer:
         self.mode_label = tk.Label(control_frame, text="Mode: Unknown", bg='#34495E',
                                    fg='#F39C12', width=20, font=('Arial', 10, 'bold'))
         self.mode_label.grid(row=0, column=3, padx=5, pady=5)
-
-        # Chunked load toggle
-        tk.Checkbutton(control_frame, text="Load in chunks (100 events)",
-                       variable=self.chunked_load,
-                       bg='#2C3E50', fg='white', selectcolor='#34495E',
-                       activebackground='#2C3E50', activeforeground='white',
-                       font=('Arial', 10)).grid(row=0, column=4, padx=15, pady=5, sticky='w')
 
         # Filter controls
         filter_frame = tk.Frame(control_frame, bg='#2C3E50')
@@ -438,17 +430,9 @@ class UnifiedEventViewer:
             self.events_parse_count = 0
             self.all_events_loaded = False
 
-            if self.chunked_load.get():
-                print(f"Chunked mode: parsing first {self.chunk_size} events...")
-                # Parse only the first chunk; rest loads lazily on navigation
-                self._parse_chunk()
-            else:
-                print(f"Full load mode: parsing all events...")
-                # Parse the entire file now (original behaviour)
-                self.unpacker.unpack()
-                self.raw_events = self.unpacker.events
-                self.all_events_loaded = True
-                print(f"Done. {len(self.raw_events)} raw events loaded.")
+            # Always parse in chunk mode
+            print(f"Parsing first chunk of {self.chunk_size} events...")
+            self._parse_chunk()
 
             # Create realtime unpacker for watch mode
             self.realtime_unpacker = RealtimeEventUnpacker(filename, self.data_mode)

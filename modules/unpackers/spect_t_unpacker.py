@@ -69,7 +69,17 @@ class SpecTDataUnpacker:
         print(f"Time unit: {'nanoseconds' if self.time_unit else 'LSB'}, "
               f"ToA LSB: {self.toa_lsb_ns} ns")
 
-        self.events = self._parse_all_events(data)
+        offset = self.file_header_size
+        event_num = 0
+
+        while offset < len(data) - 13:
+            event, next_offset = self._parse_event(data, offset, event_num)
+            if event is None:
+                break
+            self.events.append(event)
+            event_num += 1
+            offset = next_offset
+
         print(f"Unpacked {len(self.events):,} events\n")
         return self.events
 
@@ -129,12 +139,15 @@ class SpecTDataUnpacker:
 
     def _parse_header(self, data):
         """Parse the dynamic file header."""
-        if len(data) < 1:
+        if len(data) >= 1:
+            num_boards = data[0]
+            if 0 < num_boards <= 16:
+                self.file_header_size = 1 + 8 * num_boards
+            else:
+                self.file_header_size = 25  # Fallback
+        else:
             print("Warning: file too small for header")
             return
-            
-        num_boards = data[0]
-        self.file_header_size = 9 + 8 * num_boards
 
         if len(data) < self.file_header_size:
             print(f"Warning: file too small for {self.file_header_size}-byte header")
@@ -214,102 +227,3 @@ class SpecTDataUnpacker:
             mode="SPECT_TIMING",
         )
         return event, offset + size
-
-    def _parse_all_events(self, data):
-        """
-        Fast inner loop: parse every event in the buffer and return the list.
-
-        Speed notes:
-          - unpack_from avoids allocating a slice object on every field read.
-          - Struct objects are pre-compiled at module level.
-          - channel_mask is iterated by isolating set bits one at a time
-            (mask & -mask trick) so we only visit channels that actually fired
-            instead of always looping 64 times.
-          - Hot-path values (time_unit, toa_lsb_ns, data_len) are cached as
-            locals to avoid repeated attribute lookups inside the loop.
-        """
-        time_unit   = self.time_unit
-        toa_lsb_ns  = self.toa_lsb_ns
-        data_len    = len(data)
-        offset      = self.file_header_size
-
-        # Local aliases shave attribute-lookup overhead in the inner loop
-        u16_unpack  = _U16.unpack_from
-        u64_unpack  = _U64.unpack_from
-        f32_unpack  = _F32.unpack_from
-        f64_unpack  = _F64.unpack_from
-
-        events     = []
-        event_num  = 0
-
-        while offset + 27 <= data_len:
-            # ---- Event header (27 bytes) ----
-            size         = u16_unpack(data, offset)[0]
-            board_id     = data[offset + 2]
-            timestamp_us = f64_unpack(data, offset + 3)[0]
-            trigger_id   = u64_unpack(data, offset + 11)[0]
-            channel_mask = u64_unpack(data, offset + 19)[0]
-
-            hits = []
-            ho   = offset + 27          # current position within hit data
-            end  = offset + size        # hard stop: don't read past this event
-
-            # ---- Iterate over all channel hit structures until end ----
-            while ho + 2 <= end:
-                channel  = data[ho]
-                datatype = data[ho + 1]
-                ho      += 2
-
-                energy_lg = None
-                energy_hg = None
-                toa       = None
-                tot       = None
-
-                if datatype & 0x01:             # LG energy (uint16)
-                    energy_lg = u16_unpack(data, ho)[0]
-                    ho += 2
-
-                if datatype & 0x02:             # HG energy (uint16)
-                    energy_hg = u16_unpack(data, ho)[0]
-                    ho += 2
-
-                if datatype & 0x10:             # ToA
-                    if time_unit == 1:          # float32 nanoseconds
-                        toa = int(f32_unpack(data, ho)[0])
-                        ho += 4
-                    else:                       # uint32 LSB
-                        toa = _U32.unpack_from(data, ho)[0]
-                        ho += 4
-
-                if datatype & 0x20:             # ToT
-                    if time_unit == 1:          # float32 nanoseconds
-                        tot = int(f32_unpack(data, ho)[0] / toa_lsb_ns)
-                        ho += 4
-                    else:                       # uint16 LSB
-                        tot = u16_unpack(data, ho)[0]
-                        ho += 2
-
-                if channel < 64:
-                    hits.append(UnifiedHit(
-                        channel=channel,
-                        datatype=datatype,
-                        energy_lg=energy_lg,
-                        energy_hg=energy_hg,
-                        toa=toa,
-                        tot=tot,
-                    ))
-
-            events.append(UnifiedEvent(
-                event_number=event_num,
-                board_id=board_id,
-                timestamp_us=timestamp_us,
-                trigger_id=trigger_id,
-                num_hits=len(hits),
-                hits=hits,
-                channel_mask=channel_mask,
-                mode="SPECT_TIMING",
-            ))
-            event_num += 1
-            offset    += size           # jump to next event using size field
-
-        return events
