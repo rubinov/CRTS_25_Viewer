@@ -226,4 +226,5 @@ class SpecTDataUnpacker:
             channel_mask=channel_mask,
             mode="SPECT_TIMING",
         )
+        print(f'Event {event_num}: {event.board_id} {event.timestamp_us} {event.trigger_id} {event.num_hits}')
         return event, offset + size

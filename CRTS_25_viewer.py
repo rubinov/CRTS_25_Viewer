@@ -26,6 +26,9 @@ if _SCRIPT_DIR not in sys.path:
 from modules.unpackers.spect_t_unpacker import SpecTDataUnpacker
 from modules.unpackers.realtime_unpacker import RealtimeEventUnpacker, detect_file_mode
 
+# Global Analysis Parameters
+COINCIDENCE_WINDOW_US = 1.0  # Max time difference between board events to be joined into a single pairing
+
 
 class UnifiedEventViewer:
     def __init__(self, root):
@@ -75,30 +78,69 @@ class UnifiedEventViewer:
         self.hist_data = None  # dict with 'all' and 'filtered' sub-dicts when complete
         self.hist_update_id = None  # after() id for 10-second count updates
         # Filter params captured at the moment the histogram task is launched
-        self.hist_filter_min_b0 = 0
-        self.hist_filter_min_b1 = 0
-        self.hist_filter_min_b2 = 0
+        self.hist_filter_min_layers = [0] * 6
         self.hist_filter_threshold = 0
 
         # Filter criteria
-        self.min_hits_board0 = tk.IntVar(value=0)
-        self.min_hits_board1 = tk.IntVar(value=0)
-        self.min_hits_board2 = tk.IntVar(value=0)
+        self.min_hits_layers = [tk.IntVar(value=0) for _ in range(6)]
         self.hg_threshold = tk.IntVar(value=1000)  # HG threshold for SPECT_TIMING mode
 
         # Colors
         self.color_no_hit = "#4A90E2"  # Blue
         self.color_hit = "#E74C3C"     # Red
 
-        # Load board 2 strip mapping before building widgets (cells created in create_widgets)
-        self.board2_strip = self._load_board2_strip()
+        self.board0_map = self.load_combined_mapping("CRTS_new_25_mapping_board0.txt") or self._default_map(1)
+        self.board1_map = self.load_combined_mapping("CRTS_new_25_mapping_board1.txt") or self._default_map(1)
+        self.board2_map = self.load_combined_mapping("CRTS_new_25_mapping_board2.txt") or {}
+
+        # Combine maps for Top/Bot halves
+        self.top_half_map_b0 = self.board0_map
+        self.top_half_map_b2 = self.board2_map
+        
+        self.bot_half_map_b1 = self.board1_map
+        self.bot_half_map_b2 = self.board2_map
 
         # Create GUI
         self.create_widgets()
 
-        # Load default mapping files if they exist
-        self.load_mapping_file("C:/UMD-END/Janus-UMD/gui/CTS_mapping_board0.txt", 0)
-        self.load_mapping_file("C:/UMD-END/Janus-UMD/gui/CTS_mapping_board1.txt", 1)
+    def _default_map(self, row_offset):
+        m = {}
+        for ch in range(64):
+            m[ch] = (row_offset + (ch // 16), ch % 16)
+        return m
+
+    def load_combined_mapping(self, filename):
+        candidates = [
+            os.path.join(os.path.dirname(__file__), filename),
+            os.path.join(os.getcwd(), filename),
+            os.path.join(os.path.dirname(__file__), filename.replace('CRTS_new_25_mapping_', 'CTS_mapping_')),
+        ]
+        mapping = {}
+        loaded_path = None
+        for path in candidates:
+            try:
+                with open(path, 'r') as f:
+                    lines = [l.strip() for l in f if l.strip()]
+                for line in lines:
+                    if ':' not in line: continue
+                    parts = line.split(':')
+                    r = int(parts[0].strip())
+                    chs_str = parts[1].strip()
+                    if not chs_str: continue
+                    chs = [int(x.strip()) for x in chs_str.split(',')]
+                    start_col = (16 - len(chs)) // 2
+                    for col_offset, ch in enumerate(chs):
+                        mapping[ch] = (r, start_col + col_offset)
+                loaded_path = path
+                break
+            except Exception:
+                continue
+
+        if mapping:
+            print(f"Loaded mapping from {loaded_path}")
+        else:
+            print(f"Warning: Could not load mapping for {filename}")
+        return mapping
 
     def create_widgets(self):
         """Create all GUI widgets"""
@@ -129,26 +171,14 @@ class UnifiedEventViewer:
         filter_frame = tk.Frame(control_frame, bg='#2C3E50')
         filter_frame.grid(row=1, column=0, columnspan=4, padx=10, pady=10, sticky='w')
 
-        tk.Label(filter_frame, text="Min Hits Board 0:", bg='#2C3E50', fg='white',
-                font=('Arial', 11, 'bold')).pack(side=tk.LEFT, padx=5)
+        for i in range(6):
+            tk.Label(filter_frame, text=f"L{i}:", bg='#2C3E50', fg='white',
+                    font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(10 if i==0 else 5, 2))
+            tk.Spinbox(filter_frame, from_=0, to=64, textvariable=self.min_hits_layers[i],
+                      width=3, font=('Arial', 10)).pack(side=tk.LEFT, padx=0)
 
-        tk.Spinbox(filter_frame, from_=0, to=64, textvariable=self.min_hits_board0,
-                  width=5, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
-
-        tk.Label(filter_frame, text="Min Hits Board 1:", bg='#2C3E50', fg='white',
-                font=('Arial', 11, 'bold')).pack(side=tk.LEFT, padx=15)
-
-        tk.Spinbox(filter_frame, from_=0, to=64, textvariable=self.min_hits_board1,
-                  width=5, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
-
-        tk.Label(filter_frame, text="Min Hits Board 2:", bg='#2C3E50', fg='white',
-                font=('Arial', 11, 'bold')).pack(side=tk.LEFT, padx=15)
-
-        tk.Spinbox(filter_frame, from_=0, to=64, textvariable=self.min_hits_board2,
-                  width=5, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
-
-        tk.Label(filter_frame, text="HG Threshold:", bg='#2C3E50', fg='white',
-                font=('Arial', 11, 'bold')).pack(side=tk.LEFT, padx=15)
+        tk.Label(filter_frame, text="HG Thresh:", bg='#2C3E50', fg='white',
+                font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(15, 2))
 
         tk.Spinbox(filter_frame, from_=0, to=16383, textvariable=self.hg_threshold,
                   width=6, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
@@ -222,170 +252,49 @@ class UnifiedEventViewer:
         display_frame = tk.Frame(self.root, bg='#ECF0F1')
         display_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # ── Board 0 ────────────────────────────────────────────────────────
+        # ── Top Half (Board 0 + Board 2) ──────────────────────────────────
         board0_frame = tk.Frame(display_frame, bg='#ECF0F1')
-        board0_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=5)
+        board0_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False, pady=0)
 
-        # Header row: "Board 0" label (left) + board2 strip row 0
         b0_header = tk.Frame(board0_frame, bg='#ECF0F1')
-        b0_header.pack(side=tk.TOP, fill=tk.X, pady=(5, 3))
-
-        tk.Label(b0_header, text="Board 0", bg='#ECF0F1', fg='#2C3E50',
+        b0_header.pack(side=tk.TOP, fill=tk.X, pady=(2, 2))
+        tk.Label(b0_header, text="Board 0 & 2", bg='#ECF0F1', fg='#2C3E50',
                 font=('Arial', 16, 'bold'), width=10, anchor='w'
                 ).pack(side=tk.LEFT, padx=(10, 5))
 
-        strip_top_frame = tk.Frame(b0_header, bg='#ECF0F1')
-        strip_top_frame.pack(side=tk.LEFT)
-        strip0_chs = self.board2_strip[0] if self.board2_strip and len(self.board2_strip) > 0 else []
-        self.board2_strip_cells_top = self._create_strip_row(strip_top_frame, strip0_chs)
+        self.top_cells = self.create_half_grid(board0_frame, self.top_half_map_b0, self.top_half_map_b2)
 
-        self.board0_cells = self.create_board_grid(board0_frame)
-
-        # ── Separator (reduced padding to reclaim 8 px) ─────────────────────
+        # ── Separator ───────────────────────────────────────────────────
+        import tkinter.ttk as ttk
         ttk.Separator(display_frame, orient='horizontal').pack(fill=tk.X, pady=6)
 
-        # ── Board 1 ────────────────────────────────────────────────────────
+        # ── Bottom Half (Board 1 + Board 2) ─────────────────────────────
         board1_frame = tk.Frame(display_frame, bg='#ECF0F1')
-        board1_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=5)
+        board1_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False, pady=0)
 
-        # Header row: "Board 1" label (left) + board2 strip row 1
         b1_header = tk.Frame(board1_frame, bg='#ECF0F1')
-        b1_header.pack(side=tk.TOP, fill=tk.X, pady=(5, 3))
-
-        tk.Label(b1_header, text="Board 1", bg='#ECF0F1', fg='#2C3E50',
+        b1_header.pack(side=tk.TOP, fill=tk.X, pady=(2, 2))
+        tk.Label(b1_header, text="Board 1 & 2", bg='#ECF0F1', fg='#2C3E50',
                 font=('Arial', 16, 'bold'), width=10, anchor='w'
                 ).pack(side=tk.LEFT, padx=(10, 5))
 
-        strip_bot_frame = tk.Frame(b1_header, bg='#ECF0F1')
-        strip_bot_frame.pack(side=tk.LEFT)
-        strip1_chs = self.board2_strip[1] if self.board2_strip and len(self.board2_strip) > 1 else []
-        self.board2_strip_cells_bot = self._create_strip_row(strip_bot_frame, strip1_chs)
+        self.bot_cells = self.create_half_grid(board1_frame, self.bot_half_map_b1, self.bot_half_map_b2)
 
-        self.board1_cells = self.create_board_grid(board1_frame)
-
-    def create_board_grid(self, parent):
-        """Create a 16x4 grid of cells for one board with 3-line display"""
+    def create_half_grid(self, parent, map_primary, map_b2):
         grid_frame = tk.Frame(parent, bg='#ECF0F1')
         grid_frame.pack(expand=True)
-
         cells = {}
-
-        for row in range(4):
-            for col in range(16):
-                cell = tk.Label(grid_frame, text="", bg=self.color_no_hit,
-                              fg='white', font=('Courier', 9, 'bold'),
-                              width=10, height=5,
-                              relief=tk.RAISED, bd=1,
-                              justify=tk.CENTER)
-                cell.grid(row=row, column=col, padx=1, pady=0)
-                cells[(row, col)] = cell
-
+        positions = set(map_primary.values()) | set(map_b2.values())
+        
+        for r, c in positions:
+            cell = tk.Label(grid_frame, text="", bg=self.color_no_hit,
+                          fg='white', font=('Courier', 9, 'bold'),
+                          width=10, height=3,
+                          relief=tk.RAISED, bd=1,
+                          justify=tk.CENTER)
+            cell.grid(row=r, column=c, padx=1, pady=0)
+            cells[(r, c)] = cell
         return cells
-
-    def _load_board2_strip(self):
-        """Read CTS_mapping_board2.txt and return [[row0_channels], [row1_channels]].
-        Searches: script dir, cwd, then the Janus-UMD default location."""
-        candidates = [
-            os.path.join(_SCRIPT_DIR, 'CTS_mapping_board2.txt'),
-            os.path.join(os.getcwd(), 'CTS_mapping_board2.txt'),
-            'C:/UMD-END/Janus-UMD/gui/CTS_mapping_board2.txt',
-        ]
-        for path in candidates:
-            try:
-                with open(path, 'r') as f:
-                    lines = [l.strip() for l in f if l.strip()]
-                rows = [[int(x.strip()) for x in line.split(',')] for line in lines]
-                print(f"Loaded Board 2 strip mapping from {path} "
-                      f"({sum(len(r) for r in rows)} channels)")
-                return rows
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                print(f"Error reading {path}: {e}")
-        print("Board 2 strip mapping not found — strip will be empty")
-        return None
-
-    def _create_strip_row(self, parent, channels):
-        """Create a horizontal row of labelled cells for the given channel list.
-        Returns dict of ch -> Label widget."""
-        cells = {}
-        for col, ch in enumerate(channels):
-            cell = tk.Label(parent, text=f"#{ch:02d}", bg=self.color_no_hit,
-                           fg='white', font=('Courier', 9, 'bold'),
-                           width=10, height=5,
-                           relief=tk.RAISED, bd=1,
-                           justify=tk.CENTER)
-            cell.grid(row=0, column=col, padx=1, pady=0)
-            cells[ch] = cell
-        return cells
-
-    def load_mapping_file(self, filename, board):
-        """Load channel mapping from file"""
-        def parse_mapping_file(path):
-            with open(path, 'r') as f:
-                lines = f.readlines()
-            if len(lines) != 4:
-                raise ValueError(f"Mapping file must have exactly 4 lines, found {len(lines)}")
-            mapping = {}
-            for row_idx, line in enumerate(lines):
-                channels = [int(x.strip()) for x in line.strip().split(',')]
-                if len(channels) != 16:
-                    raise ValueError(f"Row {row_idx} must have 16 channels, found {len(channels)}")
-                for col_idx, ch_num in enumerate(channels):
-                    mapping[ch_num] = (row_idx, col_idx)
-            return mapping
-
-        loaded_path = None
-        mapping = None
-
-        try:
-            mapping = parse_mapping_file(filename)
-            loaded_path = filename
-        except FileNotFoundError:
-            basename = os.path.basename(filename)
-            try:
-                alt = os.path.join(os.getcwd(), basename)
-                mapping = parse_mapping_file(alt)
-                loaded_path = alt
-            except FileNotFoundError:
-                try:
-                    alt2 = os.path.join(os.path.dirname(__file__), basename)
-                    mapping = parse_mapping_file(alt2)
-                    loaded_path = alt2
-                except FileNotFoundError:
-                    try:
-                        alt3 = os.path.join(os.path.expanduser('~'), 'Janus-UMD', 'gui', basename)
-                        mapping = parse_mapping_file(alt3)
-                        loaded_path = alt3
-                    except Exception:
-                        print(f"Mapping file not found in tried locations for '{filename}' - will use default linear mapping")
-                        mapping = None
-                except Exception as e:
-                    print(f"Error reading mapping file {alt2}: {e}")
-                    mapping = None
-            except Exception as e:
-                print(f"Error reading mapping file {alt}: {e}")
-                mapping = None
-        except Exception as e:
-            print(f"Error reading mapping file {filename}: {e}")
-            mapping = None
-
-        if mapping is None:
-            mapping = {}
-            for ch in range(64):
-                row = ch // 16
-                col = ch % 16
-                mapping[ch] = (row, col)
-        else:
-            if board == 0:
-                print(f"Loaded Board 0 mapping from {loaded_path}")
-            else:
-                print(f"Loaded Board 1 mapping from {loaded_path}")
-
-        if board == 0:
-            self.board0_mapping = mapping
-        else:
-            self.board1_mapping = mapping
 
     def load_data_file(self):
         """Load a data file (auto-detect mode). Reads raw bytes immediately,
@@ -511,8 +420,8 @@ class UnifiedEventViewer:
     def _maybe_load_more(self):
         """
         Check whether we are within load_threshold events of the end of the
-        currently filtered list. If so, parse the next chunk, re-pair all
-        raw events, and re-apply the current filter.
+        currently filtered list. If so, parse chunks until we secure enough
+        additional matching events or exhaust the file.
         Called after every forward-navigation step.
         """
         if self.all_events_loaded or self.file_data is None:
@@ -522,45 +431,57 @@ class UnifiedEventViewer:
         if remaining > self.load_threshold:
             return
 
-        print(f"  [lazy load] {remaining} events remaining, fetching next chunk...")
-        n = self._parse_chunk()
-        if n == 0:
-            return
-
-        # Re-pair all raw events (incremental re-pairing is simpler/correct)
-        self.paired_events = self.pair_events_by_timestamp()
-
-        # Re-apply current filter to the extended paired list
-        min_b0 = self.min_hits_board0.get()
-        min_b1 = self.min_hits_board1.get()
-        min_b2 = self.min_hits_board2.get()
+        print(f"  [lazy load] {remaining} events remaining, fetching chunks...")
+        min_layers = [var.get() for var in self.min_hits_layers]
         threshold = self.hg_threshold.get()
-        new_filtered = self._filter_paired_events(
-            self.paired_events, min_b0, min_b1, threshold, min_b2
-        )
-        # Preserve index; fall back to all-events if filter now returns nothing
-        self.filtered_events = new_filtered if new_filtered else self.paired_events
+
+        initial_filtered_len = len(self.filtered_events)
+
+        while not self.all_events_loaded:
+            self.filter_status.config(text="Searching file for matching events...")
+            self.root.update()
+
+            if self._parse_chunk() == 0:
+                break
+
+            self.paired_events = self.pair_events_by_timestamp()
+            new_filtered = self._filter_paired_events(
+                self.paired_events, min_layers, threshold
+            )
+            
+            # If we found new matches explicitly belonging to this filter
+            if len(new_filtered) > initial_filtered_len:
+                self.filtered_events = new_filtered
+                break
+                
+        # If the file ran out doing lazy loading and we still couldn't find a single new match
+        if len(self.filtered_events) <= initial_filtered_len:
+            # Just safely re-lock to current matches
+            self.filtered_events = self._filter_paired_events(
+                self.paired_events, min_layers, threshold
+            )
+            if not self.filtered_events:
+                self.filtered_events = self.paired_events
 
         self._update_load_status()
 
     def _update_load_status(self):
         """Refresh the filter_status label."""
-        min_b0 = self.min_hits_board0.get()
-        min_b1 = self.min_hits_board1.get()
-        min_b2 = self.min_hits_board2.get()
+        min_layers = [var.get() for var in self.min_hits_layers]
 
-        if min_b0 == 0 and min_b1 == 0 and min_b2 == 0:
+        if all(x == 0 for x in min_layers):
             if self.all_events_loaded:
                 self.filter_status.config(text="Showing all events")
             else:
-                self.filter_status.config(text="Loading…")
+                self.filter_status.config(text="Showing all available events (loading...)")
         else:
-            showing = len(self.filtered_events)
-            total = len(self.paired_events)
-            self.filter_status.config(
-                text=f"Filtered: {showing}/{total} events "
-                     f"(B0>={min_b0}, B1>={min_b1}, B2>={min_b2})"
-            )
+            conds = [f"L{i}>={m}" for i, m in enumerate(min_layers) if m > 0]
+            desc = " & ".join(conds)
+            
+            if self.all_events_loaded:
+                self.filter_status.config(text=f"Filtered: {desc}")
+            else:
+                self.filter_status.config(text=f"Filtered: {desc} (loading...)")
 
     def apply_filter(self):
         """Filter events based on minimum hit criteria and update display for threshold changes"""
@@ -568,21 +489,32 @@ class UnifiedEventViewer:
             messagebox.showwarning("Warning", "No events loaded")
             return
 
-        min_b0 = self.min_hits_board0.get()
-        min_b1 = self.min_hits_board1.get()
-        min_b2 = self.min_hits_board2.get()
+        min_layers = [var.get() for var in self.min_hits_layers]
         hg_thresh = self.hg_threshold.get()
 
         self.filtered_events = self._filter_paired_events(
-            self.paired_events, min_b0, min_b1, hg_thresh, min_b2
+            self.paired_events, min_layers, hg_thresh
         )
 
+        # If current buffer has no matches, fetch chunks until we find at least one
+        while not self.filtered_events and not self.all_events_loaded:
+            self.filter_status.config(text="Searching file for matching events...")
+            self.root.update()
+            
+            if self._parse_chunk() == 0:
+                break
+            self.paired_events = self.pair_events_by_timestamp()
+            self.filtered_events = self._filter_paired_events(
+                self.paired_events, min_layers, hg_thresh
+            )
+
         if not self.filtered_events:
-            messagebox.showwarning("Warning",
-                                 f"No events match criteria:\n"
-                                 f"Board 0 >= {min_b0} hits\n"
-                                 f"Board 1 >= {min_b1} hits\n"
-                                 f"Board 2 >= {min_b2} hits")
+            msg = "No events match criteria in the entire file/buffer:\n"
+            for i, min_h in enumerate(min_layers):
+                if min_h > 0: msg += f"Layer {i} >= {min_h} hits\n"
+            if len(msg.splitlines()) == 1: msg = "No events match criteria."
+
+            messagebox.showwarning("Warning", msg)
             self.filtered_events = self.paired_events  # Reset to all
             self.filter_status.config(text="Showing all events (no matches)")
             return
@@ -626,7 +558,7 @@ class UnifiedEventViewer:
                     continue
                 other = events_to_pair[j]
                 ob = other.board_id
-                if ob in needed and abs(other.timestamp_us - evt.timestamp_us) < 1.0:
+                if ob in needed and abs(other.timestamp_us - evt.timestamp_us) <= COINCIDENCE_WINDOW_US:
                     pair[f'board{ob}'] = other
                     used.add(j)
                     needed.discard(ob)
@@ -640,25 +572,30 @@ class UnifiedEventViewer:
         if not self.filtered_events:
             return
 
-        # Clear all cells first
-        for cells in [self.board0_cells, self.board1_cells]:
-            for cell in cells.values():
-                cell.config(text="", bg=self.color_no_hit)
-        for ch, cell in {**self.board2_strip_cells_top, **self.board2_strip_cells_bot}.items():
-            cell.config(text=f"#{ch:02d}", bg=self.color_no_hit)
+        # Clear all cells to default '#CH' view
+        for mapping, cells in [
+            (self.top_half_map_b0, self.top_cells),
+            (self.top_half_map_b2, self.top_cells),
+            (self.bot_half_map_b1, self.bot_cells),
+            (self.bot_half_map_b2, self.bot_cells)
+        ]:
+            for ch, pos in mapping.items():
+                if pos in cells:
+                    cells[pos].config(text=f"#{ch:02d}", bg=self.color_no_hit)
 
         current_pair = self.filtered_events[self.current_event_idx]
 
-        if current_pair['board0']:
-            self.display_board_event(current_pair['board0'], self.board0_cells,
-                                    self.board0_mapping)
-
-        if current_pair['board1']:
-            self.display_board_event(current_pair['board1'], self.board1_cells,
-                                    self.board1_mapping)
-
+        # Render Top Half
+        if current_pair.get('board0'):
+            self.display_board_event(current_pair['board0'], self.top_cells, self.top_half_map_b0)
         if current_pair.get('board2'):
-            self.display_strip_event(current_pair['board2'])
+            self.display_board_event(current_pair['board2'], self.top_cells, self.top_half_map_b2)
+            
+        # Render Bot Half
+        if current_pair.get('board1'):
+            self.display_board_event(current_pair['board1'], self.bot_cells, self.bot_half_map_b1)
+        if current_pair.get('board2'):
+            self.display_board_event(current_pair['board2'], self.bot_cells, self.bot_half_map_b2)
 
         board0_hits = current_pair['board0'].num_hits if current_pair['board0'] else 0
         board1_hits = current_pair['board1'].num_hits if current_pair['board1'] else 0
@@ -671,84 +608,28 @@ class UnifiedEventViewer:
         )
 
     def display_board_event(self, event, cells, mapping):
-        """
-        Display event data in the board cells
-        New format:
-            Row 1: #CH
-            Row 2: HG/LG (or -- if not present)
-            Row 3: ToA/ToT (or -- if not present)
-
-        Color coding:
-            - TIMING mode: Red if hit present
-            - SPECT_TIMING mode: Red only if HG > threshold, otherwise Blue
-        """
-        hit_data = {}
-        for hit in event.hits:
-            hit_data[hit.channel] = hit
-
-        for ch in range(64):
-            if ch not in mapping:
-                continue
-
-            row, col = mapping[ch]
-            cell = cells[(row, col)]
-
+        hit_data = {hit.channel: hit for hit in event.hits}
+        for ch, pos in mapping.items():
+            if pos not in cells: continue
+            cell = cells[pos]
             if ch in hit_data:
                 hit = hit_data[ch]
-
                 line1 = f"#{ch:02d}"
-
-                if self.data_mode == "SPECT_TIMING":
-                    hg_str = f"{hit.energy_hg:04d}" if hit.energy_hg is not None else " ---"
-                    lg_str = f"{hit.energy_lg:04d}" if hit.energy_lg is not None else " ---"
+                if getattr(self, 'data_mode', 'SPECT_TIMING') == "SPECT_TIMING":
+                    hg_str = f"{hit.energy_hg:04d}" if getattr(hit, 'energy_hg', None) is not None else " ---"
+                    lg_str = f"{hit.energy_lg:04d}" if getattr(hit, 'energy_lg', None) is not None else " ---"
                     line2 = f"{hg_str}/{lg_str}"
+                    cell_color = self.color_hit if (getattr(hit, 'energy_hg', None) is not None and hit.energy_hg > self.hg_threshold.get()) else self.color_no_hit
                 else:
                     line2 = " ---/ ---"
-
-                toa_str = f"{hit.toa:04d}" if hit.toa is not None else " ---"
-                tot_str = f"{hit.tot:03d}" if hit.tot is not None else "---"
-                line3 = f"{toa_str}/{tot_str}"
-
-                text = f"{line1}\n{line2}\n{line3}"
-
-                if self.data_mode == "SPECT_TIMING":
-                    if hit.energy_hg is not None and hit.energy_hg > self.hg_threshold.get():
-                        cell_color = self.color_hit
-                    else:
-                        cell_color = self.color_no_hit
-                else:
                     cell_color = self.color_hit
 
-                cell.config(text=text, bg=cell_color)
-            else:
-                cell.config(text=f"#{ch:02d}", bg=self.color_no_hit)
+                toa_str = f"{hit.toa:04d}" if getattr(hit, 'toa', None) is not None else " ---"
+                tot_str = f"{hit.tot:03d}" if getattr(hit, 'tot', None) is not None else "---"
+                line3 = f"{toa_str}/{tot_str}"
 
-    def display_strip_event(self, event):
-        """Display board2 event hits in the strip cells (keyed by channel number)."""
-        hit_data = {hit.channel: hit for hit in event.hits}
-        threshold = self.hg_threshold.get()
-        all_strip = {**self.board2_strip_cells_top, **self.board2_strip_cells_bot}
+                cell.config(text=f"{line1}\n{line2}\n{line3}", bg=cell_color)
 
-        for ch, cell in all_strip.items():
-            if ch in hit_data:
-                hit = hit_data[ch]
-                line1 = f"#{ch:02d}"
-                if self.data_mode == "SPECT_TIMING":
-                    hg_str = f"{hit.energy_hg:04d}" if hit.energy_hg is not None else " ---"
-                    lg_str = f"{hit.energy_lg:04d}" if hit.energy_lg is not None else " ---"
-                    line2 = f"{hg_str}/{lg_str}"
-                else:
-                    line2 = " ---/ ---"
-                toa_str = f"{hit.toa:04d}" if hit.toa is not None else " ---"
-                tot_str = f"{hit.tot:03d}" if hit.tot is not None else "---"
-                text = f"{line1}\n{line2}\n{toa_str}/{tot_str}"
-                if self.data_mode == "SPECT_TIMING":
-                    color = (self.color_hit
-                             if hit.energy_hg is not None and hit.energy_hg > threshold
-                             else self.color_no_hit)
-                else:
-                    color = self.color_hit
-                cell.config(text=text, bg=color)
             # cells not in hit_data were already reset to blue by update_display
 
     def first_event(self):
@@ -807,13 +688,11 @@ class UnifiedEventViewer:
                 self.raw_events.extend(new_events)
                 self.paired_events = self.pair_events_by_timestamp()
 
-                min_b0 = self.min_hits_board0.get()
-                min_b1 = self.min_hits_board1.get()
-                min_b2 = self.min_hits_board2.get()
+                min_layers = [var.get() for var in self.min_hits_layers]
                 threshold = self.hg_threshold.get()
 
                 self.filtered_events = self._filter_paired_events(
-                    self.paired_events, min_b0, min_b1, threshold, min_b2
+                    self.paired_events, min_layers, threshold
                 )
 
                 if self.filtered_events:
@@ -827,9 +706,38 @@ class UnifiedEventViewer:
         if self.watch_active:
             self.watch_after_id = self.root.after(500, self.check_for_new_events)
 
-    def _filter_paired_events(self, paired_events, min_b0, min_b1, threshold, min_b2=0):
-        """Helper to filter paired events by hit counts and threshold"""
+    def _filter_paired_events(self, paired_events, min_layers, threshold):
+        """Helper to filter paired events by hit counts per layer and threshold"""
         filtered = []
+
+        for pair in paired_events:
+            layer_hits = [0] * 6
+            for b_name, b_map in [('board0', self.board0_map), ('board1', self.board1_map), ('board2', self.board2_map)]:
+                evt = pair.get(b_name)
+                if not evt: continue
+                
+                for hit in evt.hits:
+                    if self.data_mode == "SPECT_TIMING":
+                        if getattr(hit, 'energy_hg', None) is None or hit.energy_hg <= threshold:
+                            continue
+                            
+                    ch = hit.channel
+                    pos = b_map.get(ch)
+                    if pos:
+                        layer = pos[0]
+                        if 0 <= layer < 6:
+                            layer_hits[layer] += 1
+            
+            passes = True
+            for L in range(6):
+                if layer_hits[L] < min_layers[L]:
+                    passes = False
+                    break
+            
+            if passes:
+                filtered.append(pair)
+
+        return filtered
 
         for pair in paired_events:
             if pair['board0']:
@@ -923,9 +831,7 @@ class UnifiedEventViewer:
             return  # Already running
 
         # Snapshot the current filter settings
-        self.hist_filter_min_b0 = self.min_hits_board0.get()
-        self.hist_filter_min_b1 = self.min_hits_board1.get()
-        self.hist_filter_min_b2 = self.min_hits_board2.get()
+        self.hist_filter_min_layers = [var.get() for var in self.min_hits_layers]
         self.hist_filter_threshold = self.hg_threshold.get()
 
         with self.hist_lock:
@@ -955,10 +861,8 @@ class UnifiedEventViewer:
         """
         data = self.file_data
         offset = self.unpacker.file_header_size
-        min_b0    = self.hist_filter_min_b0
-        min_b1    = self.hist_filter_min_b1
-        min_b2    = self.hist_filter_min_b2
-        threshold = self.hist_filter_threshold
+        min_layers = self.hist_filter_min_layers
+        threshold  = self.hist_filter_threshold
 
         NBINS = 4096
 
@@ -1016,7 +920,7 @@ class UnifiedEventViewer:
 
         # ── Pass 2: pair events and apply the filter ─────────────────────────
         pairs = self._pair_raw_events(all_parsed)
-        filtered_pairs = self._filter_paired_events(pairs, min_b0, min_b1, threshold, min_b2)
+        filtered_pairs = self._filter_paired_events(pairs, min_layers, threshold)
 
         filtered_ids = set()
         for pair in filtered_pairs:
@@ -1044,9 +948,7 @@ class UnifiedEventViewer:
             'all':      {'hg': hg,   'lg': lg,   'toa': toa_h,  'tot': tot_h},
             'filtered': {'hg': hg_f, 'lg': lg_f, 'toa': toa_hf, 'tot': tot_hf},
             'filter_params': {
-                'min_hits_board0': min_b0,
-                'min_hits_board1': min_b1,
-                'min_hits_board2': min_b2,
+                'min_hits_layers': min_layers,
                 'hg_threshold':    threshold,
             },
         }
@@ -1134,9 +1036,7 @@ class UnifiedEventViewer:
 
                 fgrp = f.create_group('filtered')
                 fp = self.hist_data['filter_params']
-                fgrp.attrs['min_hits_board0'] = fp['min_hits_board0']
-                fgrp.attrs['min_hits_board1'] = fp['min_hits_board1']
-                fgrp.attrs['min_hits_board2'] = fp['min_hits_board2']
+                fgrp.attrs['min_hits_layers'] = fp['min_hits_layers']
                 fgrp.attrs['hg_threshold']    = fp['hg_threshold']
                 write_board_channel_group(fgrp, self.hist_data['filtered'])
 
