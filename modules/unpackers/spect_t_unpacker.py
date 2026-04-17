@@ -13,6 +13,7 @@ from .unified_data_structures import UnifiedHit, UnifiedEvent
 # Pre-compiled struct objects — format strings are parsed once at import time,
 # not on every unpack call.
 _U16 = struct.Struct('<H')   # uint16
+_U32 = struct.Struct('<I')   # uint32
 _U64 = struct.Struct('<Q')   # uint64
 _F32 = struct.Struct('<f')   # float32
 _F64 = struct.Struct('<d')   # float64 (timestamp)
@@ -170,10 +171,7 @@ class SpecTDataUnpacker:
         ho   = offset + 27
         end  = offset + size
 
-        mask = channel_mask
-        while mask and ho + 2 <= end:
-            lsb      = mask & (-mask)
-            mask    ^= lsb
+        while ho + 2 <= end:
             channel  = data[ho]
             datatype = data[ho + 1]
             ho      += 2
@@ -188,21 +186,22 @@ class SpecTDataUnpacker:
                 if time_unit == 1:
                     toa = int(_F32.unpack_from(data, ho)[0]); ho += 4
                 else:
-                    toa = _U16.unpack_from(data, ho)[0]; ho += 2
+                    toa = _U32.unpack_from(data, ho)[0]; ho += 4
             if datatype & 0x20:
                 if time_unit == 1:
                     tot = int(_F32.unpack_from(data, ho)[0] / toa_lsb_ns); ho += 4
                 else:
                     tot = _U16.unpack_from(data, ho)[0]; ho += 2
 
-            hits.append(UnifiedHit(
-                channel=channel,
-                datatype=datatype,
-                energy_lg=energy_lg,
-                energy_hg=energy_hg,
-                toa=toa,
-                tot=tot,
-            ))
+            if channel < 64:
+                hits.append(UnifiedHit(
+                    channel=channel,
+                    datatype=datatype,
+                    energy_lg=energy_lg,
+                    energy_hg=energy_hg,
+                    toa=toa,
+                    tot=tot,
+                ))
 
         event = UnifiedEvent(
             event_number=event_num,
@@ -255,11 +254,8 @@ class SpecTDataUnpacker:
             ho   = offset + 27          # current position within hit data
             end  = offset + size        # hard stop: don't read past this event
 
-            # ---- Iterate only over channels that fired ----
-            mask = channel_mask
-            while mask and ho + 2 <= end:
-                lsb      = mask & (-mask)       # lowest set bit
-                mask    ^= lsb                  # clear it
+            # ---- Iterate over all channel hit structures until end ----
+            while ho + 2 <= end:
                 channel  = data[ho]
                 datatype = data[ho + 1]
                 ho      += 2
@@ -281,9 +277,9 @@ class SpecTDataUnpacker:
                     if time_unit == 1:          # float32 nanoseconds
                         toa = int(f32_unpack(data, ho)[0])
                         ho += 4
-                    else:                       # uint16 LSB
-                        toa = u16_unpack(data, ho)[0]
-                        ho += 2
+                    else:                       # uint32 LSB
+                        toa = _U32.unpack_from(data, ho)[0]
+                        ho += 4
 
                 if datatype & 0x20:             # ToT
                     if time_unit == 1:          # float32 nanoseconds
@@ -293,14 +289,15 @@ class SpecTDataUnpacker:
                         tot = u16_unpack(data, ho)[0]
                         ho += 2
 
-                hits.append(UnifiedHit(
-                    channel=channel,
-                    datatype=datatype,
-                    energy_lg=energy_lg,
-                    energy_hg=energy_hg,
-                    toa=toa,
-                    tot=tot,
-                ))
+                if channel < 64:
+                    hits.append(UnifiedHit(
+                        channel=channel,
+                        datatype=datatype,
+                        energy_lg=energy_lg,
+                        energy_hg=energy_hg,
+                        toa=toa,
+                        tot=tot,
+                    ))
 
             events.append(UnifiedEvent(
                 event_number=event_num,
